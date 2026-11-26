@@ -1,0 +1,47 @@
+# ---- Secrets (never commit) ----
+.env
+*.env
+!.env.example
+**/service-account*.json
+firebase/.firebaserc
+*.keystore
+*.jks
+**/key.properties
+
+# ---- Python / backend ----
+venv/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# ---- Flutter / Dart ----
+frontend/.dart_tool/
+frontend/build/
+frontend/.flutter-plugins
+frontend/.flutter-plugins-dependencies
+frontend/.idea/
+frontend/*.iml
+frontend/android/.gradle/
+frontend/android/.kotlin/
+frontend/android/local.properties
+frontend/android/app/.cxx/
+frontend/ios/Pods/
+frontend/ios/.symlinks/
+
+# ---- Firebase / Node ----
+firebase/node_modules/
+firebase/*-debug.log
+firebase/.firebase/
+
+# ---- Citadel data (encrypted, but still user data) ----
+*.citadel
+*.db
+*.db-wal
+*.db-shm
+
+# ---- OS / editors ----
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

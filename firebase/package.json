@@ -1,0 +1,14 @@
+{
+  "name": "citadel-firebase",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:rules": "firebase emulators:exec --only firestore --project demo-citadel \"node --test tests/\"",
+    "deploy:rules": "firebase deploy --only firestore:rules,firestore:indexes"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^5.0.2",
+    "firebase": "^12.19.0",
+    "firebase-tools": "^15.37.0"
+  }
+}

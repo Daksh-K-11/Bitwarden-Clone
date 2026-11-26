@@ -1,0 +1,143 @@
+rules_version = '2';
+
+// Citadel Firestore security rules.
+//
+// The server stores only ciphertext; these rules make sure that
+//  * nothing is readable or writable unless explicitly allowed (default deny),
+//  * a user can only touch documents under /users/{their uid},
+//  * the account's email is verified,
+//  * documents have exactly the expected shape and bounded size,
+//  * record revisions only ever move forward by one (optimistic concurrency
+//    enforced server-side, not just by the client),
+//  * key material cannot be rolled back to an older key generation,
+//  * devices that were revoked can no longer write records, and a revoked
+//    device cannot un-revoke itself.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isOwner(uid) {
+      return request.auth != null
+        && request.auth.uid == uid
+        && request.auth.token.email_verified == true;
+    }
+
+    function isUuid(s) {
+      return s is string && s.matches('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$');
+    }
+
+    function deviceActive(uid, deviceId) {
+      let path = /databases/$(database)/documents/users/$(uid)/devices/$(deviceId);
+      return exists(path) && get(path).data.revoked == false;
+    }
+
+    match /users/{uid} {
+      // The root user doc carries no data; it may only be deleted (account deletion).
+      allow read, delete: if isOwner(uid);
+      allow create, update: if false;
+
+      // ------------------------------------------------------- key material
+      match /meta/{docId} {
+        allow read, delete: if isOwner(uid) && docId == 'keys';
+        allow create: if isOwner(uid) && docId == 'keys' && validKeys(request.resource.data);
+        allow update: if isOwner(uid) && docId == 'keys'
+          && validKeys(request.resource.data)
+          && request.resource.data.vaultId == resource.data.vaultId
+          && request.resource.data.keyGeneration >= resource.data.keyGeneration;
+
+        function validKeys(d) {
+          return d.keys().hasOnly(['vaultId', 'kdf', 'wrappedVek', 'cryptoVersion', 'keyGeneration', 'updatedAt', 'serverUpdatedAt'])
+            && d.keys().hasAll(['vaultId', 'kdf', 'wrappedVek', 'cryptoVersion', 'keyGeneration', 'updatedAt', 'serverUpdatedAt'])
+            && isUuid(d.vaultId)
+            && d.kdf is map
+            && d.kdf.keys().hasOnly(['alg', 'ops', 'memKiB', 'salt'])
+            && d.kdf.alg == 'argon2id13'
+            && d.kdf.ops is int && d.kdf.ops >= 2 && d.kdf.ops <= 10
+            && d.kdf.memKiB is int && d.kdf.memKiB >= 19456 && d.kdf.memKiB <= 1048576
+            && d.kdf.salt is string && d.kdf.salt.size() <= 32
+            && d.wrappedVek is string && d.wrappedVek.size() <= 128
+            && d.cryptoVersion is int && d.cryptoVersion >= 1
+            && d.keyGeneration is int && d.keyGeneration >= 1
+            && d.updatedAt is string && d.updatedAt.size() <= 40
+            && d.serverUpdatedAt == request.time;
+        }
+      }
+
+      // ------------------------------------------------------------ records
+      match /records/{recordId} {
+        allow read: if isOwner(uid);
+        // Hard delete only for account deletion; normal deletes are tombstones.
+        allow delete: if isOwner(uid);
+        allow create: if isOwner(uid)
+          && validRecord(recordId, request.resource.data)
+          && request.resource.data.rev == 1
+          && deviceActive(uid, request.resource.data.deviceId);
+        allow update: if isOwner(uid)
+          && validRecord(recordId, request.resource.data)
+          && request.resource.data.rev == resource.data.rev + 1
+          && request.resource.data.kind == resource.data.kind
+          && request.resource.data.createdAt == resource.data.createdAt
+          && deviceActive(uid, request.resource.data.deviceId);
+
+        function validRecord(id, d) {
+          return isUuid(id)
+            && d.keys().hasOnly(['kind', 'v', 'payload', 'rev', 'deleted', 'kg', 'createdAt', 'updatedAt', 'deviceId'])
+            && d.keys().hasAll(['kind', 'v', 'payload', 'rev', 'deleted', 'kg', 'createdAt', 'updatedAt', 'deviceId'])
+            && d.kind in ['item', 'folder', 'tag']
+            && d.v == 1
+            && d.rev is int
+            && d.deleted is bool
+            && (d.deleted
+                  ? d.payload == null
+                  : (d.payload is bytes && d.payload.size() >= 42 && d.payload.size() <= 1000000))
+            && d.kg is int && d.kg >= 1
+            && d.createdAt is timestamp
+            && d.updatedAt == request.time
+            && isUuid(d.deviceId);
+        }
+      }
+
+      // ------------------------------------------------------------ devices
+      match /devices/{deviceId} {
+        allow read, delete: if isOwner(uid);
+        allow create: if isOwner(uid) && isUuid(deviceId)
+          && request.resource.data.keys().hasOnly(['name', 'platform', 'osVersion', 'model', 'createdAt', 'lastActiveAt', 'signPublicKey', 'kxPublicKey', 'registrationSignature', 'revoked'])
+          && request.resource.data.name is string && request.resource.data.name.size() <= 80
+          && request.resource.data.platform is string && request.resource.data.platform.size() <= 20
+          && request.resource.data.osVersion is string && request.resource.data.osVersion.size() <= 120
+          && request.resource.data.model is string && request.resource.data.model.size() <= 120
+          && request.resource.data.signPublicKey is string && request.resource.data.signPublicKey.size() == 44
+          && request.resource.data.kxPublicKey is string && request.resource.data.kxPublicKey.size() == 44
+          && request.resource.data.registrationSignature is string && request.resource.data.registrationSignature.size() == 88
+          && request.resource.data.createdAt == request.time
+          && request.resource.data.lastActiveAt == request.time
+          && request.resource.data.revoked == false;
+        allow update: if isOwner(uid)
+          // Identity keys and registration are immutable.
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'osVersion', 'lastActiveAt', 'revoked', 'revokedAt'])
+          && request.resource.data.name is string && request.resource.data.name.size() <= 80
+          // Revocation is one-way.
+          && !(resource.data.revoked == true && request.resource.data.revoked != true)
+          && (!('lastActiveAt' in request.resource.data.diff(resource.data).affectedKeys()) || request.resource.data.lastActiveAt == request.time)
+          && (!('revokedAt' in request.resource.data.diff(resource.data).affectedKeys()) || request.resource.data.revokedAt == request.time);
+      }
+
+      // ------------------------------------------------------ backup index
+      match /backups/{backupId} {
+        allow read, delete: if isOwner(uid);
+        allow create: if isOwner(uid) && isUuid(backupId)
+          && request.resource.data.keys().hasOnly(['createdAt', 'encryptedSize', 'cipherSha256', 'formatVersion', 'deviceId'])
+          && request.resource.data.createdAt is timestamp
+          && request.resource.data.encryptedSize is int && request.resource.data.encryptedSize > 0
+          && request.resource.data.cipherSha256.matches('^[0-9a-f]{64}$')
+          && request.resource.data.formatVersion is int
+          && isUuid(request.resource.data.deviceId);
+        allow update: if false;
+      }
+    }
+
+    // Everything else: denied.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
